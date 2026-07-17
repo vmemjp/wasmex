@@ -50,13 +50,45 @@ defmodule Wasmex.Pipe do
   @doc ~S"""
   Creates and returns a new Pipe.
 
+  The pipe is unbounded: it grows to hold whatever is written to it. Use
+  `new/1` to cap it.
+
   ## Example
 
       iex> {:ok, %Pipe{}} = Wasmex.Pipe.new()
   """
   @spec new() :: {:error, reason :: binary()} | {:ok, __MODULE__.t()}
-  def new() do
-    case Wasmex.Native.pipe_new() do
+  def new(), do: new(nil)
+
+  @doc ~S"""
+  Creates and returns a new Pipe holding at most `capacity` bytes.
+
+  A pipe lives in host memory, outside the guest's linear memory — so
+  `Wasmex.StoreLimits` does not bound it, and neither does fuel, because
+  `fd_write` is a host call that costs the guest O(1) no matter how many
+  bytes it moves. A capacity is the only thing that bounds a guest looping
+  on writes.
+
+  A write that would take the pipe beyond `capacity` is rejected in full —
+  never partially written — and traps the guest. An errno would be advisory,
+  and a guest writing in a loop is precisely one that may ignore it.
+
+  Capacity bounds the bytes the pipe *holds*, not the bytes written through
+  it: seeking back and overwriting does not count against it.
+
+  Passing `nil` is the same as `new/0` and leaves the pipe unbounded.
+
+  ## Example
+
+      iex> {:ok, pipe} = Wasmex.Pipe.new(5)
+      iex> Wasmex.Pipe.write(pipe, "hello")
+      {:ok, 5}
+      iex> Wasmex.Pipe.write(pipe, "!")
+      :error
+  """
+  @spec new(non_neg_integer() | nil) :: {:error, reason :: binary()} | {:ok, __MODULE__.t()}
+  def new(capacity) when is_nil(capacity) or (is_integer(capacity) and capacity >= 0) do
+    case Wasmex.Native.pipe_new(capacity) do
       {:error, err} -> {:error, err}
       resource -> {:ok, __wrap_resource__(resource)}
     end
