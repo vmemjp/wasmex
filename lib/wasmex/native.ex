@@ -24,7 +24,17 @@ defmodule Wasmex.Native do
       x86_64-unknown-linux-gnu
       x86_64-unknown-linux-musl
     ),
-    force_build: System.get_env("WASMEX_BUILD") in ["1", "true"]
+    # FORK-ONLY — do not upstream. Upstream reads WASMEX_BUILD here.
+    #
+    # This fork carries Rust patches (the bounded Pipe), so a precompiled NIF
+    # is never the right artifact for it: `base_url` above points at
+    # *tessi's* releases, and downloading one would run unpatched code under
+    # a patched Elixir API — the byte cap would simply not exist, silently.
+    #
+    # Leaving it as `System.get_env("WASMEX_BUILD")` would make that outcome a
+    # matter of whether an env var happened to be exported. It is pinned to
+    # `true` so the source is the only thing that can ever run.
+    force_build: true
 
   def engine_new(_engine_config), do: error()
   def engine_precompile_module(_engine_resource, _bytes), do: error()
