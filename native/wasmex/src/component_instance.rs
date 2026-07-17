@@ -338,7 +338,9 @@ fn component_execute_function(
                 encode_result(env, result)
             }
             Err(err) => {
-                let reason = format!("{err}");
+                // See instance.rs: `{err:#}` keeps the source chain, where a
+                // host function's own error message lives.
+                let reason = format!("{err:#}");
                 if let Ok(trap) = err.downcast::<Trap>() {
                     env.error_tuple(format!(
                         "Error during function excecution ({trap}): {reason}"

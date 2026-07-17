@@ -305,7 +305,12 @@ fn execute_function(
         match call_result {
             Ok(_) => (),
             Err(err) => {
-                let reason = format!("{err}");
+                // `{err:#}`, not `{err}`: anyhow's plain Display prints only
+                // the outermost message, which for a call error is the wasm
+                // backtrace. Whatever a host function attached — the actual
+                // reason it failed — hangs off the source chain and was being
+                // dropped on the floor. The alternate form walks the chain.
+                let reason = format!("{err:#}");
                 if let Ok(trap) = err.downcast::<Trap>() {
                     return env
                         .error_tuple(format!(
