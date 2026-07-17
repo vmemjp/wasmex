@@ -70,6 +70,38 @@ defmodule Wasmex.StoreOrCaller do
   end
 
   @doc ~S"""
+  Traps this store's guest once the engine's epoch has advanced
+  `ticks_beyond_current` times from now.
+
+  Requires an engine built with `Wasmex.EngineConfig.epoch_interruption/2`;
+  on any other engine this has no effect, because nothing checks. Note also
+  that nothing advances the epoch by itself — `Wasmex.Engine.increment_epoch/1`
+  is what makes a deadline arrive.
+
+  Unlike fuel, this bounds a guest in *time* rather than in instructions, and
+  it is the only mechanism that reaches a guest blocked inside a host call.
+
+  ## Errors
+
+  Returns an error if the store is a `Caller` used outside its own function
+  scope.
+
+  ## Example
+
+      iex> {:ok, engine} = Wasmex.Engine.new(%Wasmex.EngineConfig{epoch_interruption: true})
+      iex> {:ok, store} = Wasmex.Store.new(nil, engine)
+      iex> Wasmex.StoreOrCaller.set_epoch_deadline(store, 1)
+      :ok
+  """
+  @spec set_epoch_deadline(__MODULE__.t(), non_neg_integer()) :: :ok | {:error, binary()}
+  def set_epoch_deadline(%__MODULE__{resource: resource}, ticks_beyond_current) do
+    case Wasmex.Native.store_or_caller_set_epoch_deadline(resource, ticks_beyond_current) do
+      {} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc ~S"""
   Returns the amount of fuel available for future execution of this store.
 
   ## Examples

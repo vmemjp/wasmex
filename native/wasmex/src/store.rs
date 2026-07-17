@@ -344,6 +344,37 @@ pub fn new_wasi(
     Ok(resource)
 }
 
+/// Traps this store's guest once the engine's epoch has advanced
+/// `ticks_beyond_current` times.
+///
+/// Requires an engine built with `epoch_interruption: true`. Nothing advances
+/// the epoch on its own — `Wasmex.Engine.increment_epoch/1` does, and it is
+/// what turns this into a deadline.
+#[rustler::nif(name = "store_or_caller_set_epoch_deadline")]
+pub fn set_epoch_deadline(
+    store_or_caller_resource: ResourceArc<StoreOrCallerResource>,
+    ticks_beyond_current: u64,
+) -> Result<(), rustler::Error> {
+    let store_or_caller: &mut StoreOrCaller =
+        &mut *(store_or_caller_resource.inner.try_lock().map_err(|e| {
+            rustler::Error::Term(Box::new(format!("Could not unlock store resource: {e}")))
+        })?);
+    match store_or_caller {
+        StoreOrCaller::Store(store) => store.set_epoch_deadline(ticks_beyond_current),
+        // `Caller` has no `set_epoch_deadline` of its own; it reaches the
+        // store's through `AsContextMut`.
+        StoreOrCaller::Caller(token) => get_caller_mut(token)
+            .ok_or_else(|| {
+                rustler::Error::Term(Box::new(
+                    "Caller is not valid. Only use a caller within its own function scope.",
+                ))
+            })
+            .map(|c| c.as_context_mut().set_epoch_deadline(ticks_beyond_current))?,
+    };
+
+    Ok(())
+}
+
 #[rustler::nif(name = "store_or_caller_set_fuel")]
 pub fn set_fuel(
     store_or_caller_resource: ResourceArc<StoreOrCallerResource>,

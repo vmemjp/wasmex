@@ -1,4 +1,4 @@
-use rustler::{Binary, Error, NifStruct, OwnedBinary, Resource, ResourceArc};
+use rustler::{Atom, Binary, Error, NifStruct, OwnedBinary, Resource, ResourceArc};
 use std::ops::Deref;
 use std::sync::{LazyLock, Mutex};
 use wasmtime::{Config, Engine, WasmBacktraceDetails};
@@ -23,6 +23,7 @@ pub static TOKIO_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 #[module = "Wasmex.EngineConfig"]
 pub struct ExEngineConfig {
     consume_fuel: bool,
+    epoch_interruption: bool,
     wasm_backtrace_details: bool,
     cranelift_opt_level: rustler::Atom,
     memory64: bool,
@@ -48,6 +49,18 @@ pub fn new(
     });
 
     Ok(resource)
+}
+
+/// Advances the engine's epoch by one.
+///
+/// Every store on this engine whose epoch deadline has now passed traps at
+/// its next check. Cheap by design — a relaxed atomic increment — so it is
+/// safe to call from a timer without a dirty scheduler.
+#[rustler::nif(name = "engine_increment_epoch")]
+pub fn increment_epoch(engine_resource: ResourceArc<EngineResource>) -> Result<Atom, rustler::Error> {
+    let engine: Engine = unwrap_engine(engine_resource)?;
+    engine.increment_epoch();
+    Ok(atoms::ok())
 }
 
 #[rustler::nif(name = "engine_precompile_module", schedule = "DirtyCpu")]
@@ -84,6 +97,7 @@ pub(crate) fn engine_config(engine_config: ExEngineConfig) -> Config {
 
     let mut config = Config::new();
     config.consume_fuel(engine_config.consume_fuel);
+    config.epoch_interruption(engine_config.epoch_interruption);
     config.wasm_backtrace_details(backtrace_details);
     config.cranelift_opt_level(cranelift_opt_level);
     config.wasm_memory64(engine_config.memory64);

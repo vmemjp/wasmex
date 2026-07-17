@@ -28,6 +28,7 @@ defmodule Wasmex.Native do
 
   def engine_new(_engine_config), do: error()
   def engine_precompile_module(_engine_resource, _bytes), do: error()
+  def engine_increment_epoch(_engine_resource), do: error()
 
   def module_compile(_store_or_caller_resource, _bytes), do: error()
   def module_exports(_module_resource), do: error()
@@ -89,6 +90,8 @@ defmodule Wasmex.Native do
 
   def store_or_caller_get_fuel(_store_or_caller_resource), do: error()
   def store_or_caller_set_fuel(_store_or_caller_resource, _fuel), do: error()
+  def store_or_caller_set_epoch_deadline(_store_or_caller_resource, _ticks_beyond_current),
+    do: error()
 
   def component_new(_store, _component_bytes), do: error()
   def component_instance_new(_store, _component, _imports), do: error()

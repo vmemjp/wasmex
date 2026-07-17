@@ -101,6 +101,36 @@ defmodule Wasmex.Engine do
       serialized_module -> {:ok, serialized_module}
     end
   end
+
+  @doc ~S"""
+  Advances this engine's epoch by one.
+
+  Any store on this engine whose epoch deadline has now passed traps at its
+  next check — see `Wasmex.EngineConfig.epoch_interruption/2` and
+  `Wasmex.StoreOrCaller.set_epoch_deadline/2`. Without this call, deadlines
+  never arrive: nothing else advances the epoch.
+
+  A relaxed atomic increment, so it is cheap enough to call from a timer, and
+  safe to call from any process. On an engine without `epoch_interruption`
+  it is a no-op that nothing observes.
+
+  Typically driven either by one timer per call (`Process.send_after/3`, then
+  increment once to expire that call's deadline) or by a single periodic
+  ticker for all stores, with each store's deadline expressed in ticks.
+
+  ## Example
+
+      iex> {:ok, engine} = Wasmex.Engine.new(%Wasmex.EngineConfig{epoch_interruption: true})
+      iex> Wasmex.Engine.increment_epoch(engine)
+      :ok
+  """
+  @spec increment_epoch(__MODULE__.t()) :: :ok | {:error, binary()}
+  def increment_epoch(%__MODULE__{resource: resource}) do
+    case Wasmex.Native.engine_increment_epoch(resource) do
+      {:error, err} -> {:error, err}
+      :ok -> :ok
+    end
+  end
 end
 
 defimpl Inspect, for: Wasmex.Engine do
