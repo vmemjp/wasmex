@@ -69,9 +69,13 @@ defmodule Wasmex.Pipe do
   bytes it moves. A capacity is the only thing that bounds a guest looping
   on writes.
 
-  A write that would take the pipe beyond `capacity` is rejected in full —
-  never partially written — and traps the guest. An errno would be advisory,
-  and a guest writing in a loop is precisely one that may ignore it.
+  An Elixir write that would take the pipe beyond `capacity` is rejected in
+  full. Guest output traps on capacity overflow. WASI preview1 divides guest
+  output into writes of at most 4096 bytes, so earlier writes from the same
+  `fd_write` call may remain in the pipe when a later write traps. It also
+  writes only the first non-empty buffer of a vectored `fd_write` per call,
+  leaving the rest to the guest's next call. An errno would be advisory, and
+  a guest writing in a loop may ignore it.
 
   Capacity bounds the bytes the pipe *holds*, not the bytes written through
   it: seeking back and overwriting does not count against it.

@@ -78,7 +78,7 @@ pub fn grow(
 }
 
 /// Grows the memory by the given amount of pages. Returns the old page count.
-fn grow_by_pages<T>(
+fn grow_by_pages<T: 'static>(
     memory: &Memory,
     store: &mut Store<T>,
     number_of_pages: u64,

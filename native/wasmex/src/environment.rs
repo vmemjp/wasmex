@@ -10,7 +10,6 @@ use rustler::{
 };
 use std::sync::{Condvar, Mutex};
 use wasmtime::{Caller, Engine, FuncType, Linker, Val, ValType};
-use wiggle::anyhow::{self, anyhow};
 
 pub struct CallbackTokenResource {
     pub token: CallbackToken,
@@ -146,7 +145,7 @@ fn link_imported_function(
             move |mut caller: Caller<'_, StoreData>,
                   params: &[Val],
                   results: &mut [Val]|
-                  -> Result<(), anyhow::Error> {
+                  -> wasmtime::Result<()> {
                 let callback_token = ResourceArc::new(CallbackTokenResource {
                     token: CallbackToken {
                         continue_signal: Condvar::new(),
@@ -239,7 +238,9 @@ fn link_imported_function(
                     .expect("expect callback token to contain a result");
                 match result {
                     (true, return_values) => write_results(results, return_values),
-                    (false, _) => Err(anyhow!("the elixir callback threw an exception")),
+                    (false, _) => Err(wasmtime::format_err!(
+                        "the elixir callback threw an exception"
+                    )),
                 }
             },
         )
@@ -248,7 +249,7 @@ fn link_imported_function(
     Ok(())
 }
 
-fn write_results(results: &mut [Val], return_values: &[WasmValue]) -> Result<(), anyhow::Error> {
+fn write_results(results: &mut [Val], return_values: &[WasmValue]) -> wasmtime::Result<()> {
     results.clone_from_slice(&map_wasm_values_to_vals(return_values));
     Ok(())
 }

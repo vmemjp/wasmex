@@ -5,15 +5,12 @@ use crate::{
 };
 use rustler::{Error, NifStruct, ResourceArc};
 use std::{collections::HashMap, sync::Mutex};
-use wasi_common::sync::WasiCtxBuilder;
 use wasmtime::{
     AsContext, AsContextMut, Engine, Store, StoreContext, StoreContextMut, StoreLimits,
     StoreLimitsBuilder,
 };
-use wasmtime_wasi::ResourceTable;
-use wasmtime_wasi::WasiCtx;
-use wasmtime_wasi::WasiView;
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
+use wasmtime_wasi::{p1::WasiP1Ctx, FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 #[derive(Debug, NifStruct)]
 #[module = "Wasmex.Wasi.PreopenOptions"]
@@ -99,7 +96,7 @@ impl ExStoreLimits {
 }
 
 pub struct StoreData {
-    pub(crate) wasi: Option<wasi_common::WasiCtx>,
+    pub(crate) wasi: Option<WasiP1Ctx>,
     pub(crate) limits: StoreLimits,
 }
 
@@ -111,12 +108,12 @@ pub struct ComponentStoreData {
 }
 
 impl WasiHttpView for ComponentStoreData {
-    fn ctx(&mut self) -> &mut WasiHttpCtx {
-        self.http.as_mut().expect("WasiHttpCtx is not set")
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: self.http.as_mut().expect("WasiHttpCtx is not set"),
+            table: &mut self.table,
+            hooks: wasmtime_wasi_http::default_hooks(),
+        }
     }
 }
 
@@ -304,13 +301,24 @@ pub fn new_wasi(
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<Vec<_>>();
 
+    // wasi-common rejected NUL bytes in args and env; wasmtime-wasi stores them as is,
+    // and a C guest would read the string as truncated. Keep the old error.
+    let has_nul = options.args.iter().any(|a| a.contains('\0'))
+        || wasi_env
+            .iter()
+            .any(|(k, v)| k.contains('\0') || v.contains('\0'));
+    if has_nul {
+        return Err(Error::Term(Box::new(
+            "WASI args and env must not contain NUL bytes",
+        )));
+    }
+
     let mut builder = WasiCtxBuilder::new();
 
-    builder
-        .args(&options.args)
-        .map_err(|err| Error::Term(Box::new(err.to_string())))?
-        .envs(wasi_env)
-        .map_err(|err| Error::Term(Box::new(err.to_string())))?;
+    builder.args(&options.args).envs(wasi_env);
+    // The NIF already runs on a dirty scheduler, so let preopened-directory I/O run
+    // in this thread as wasi-common did, instead of a spawn_blocking hop per call.
+    builder.allow_blocking_current_thread(true);
 
     add_pipe(options.stdin, &mut builder, |pipe, builder| {
         builder.stdin(pipe);
@@ -322,7 +330,7 @@ pub fn new_wasi(
         builder.stderr(pipe);
     })?;
     wasi_preopen_directories(options.preopen, &mut builder)?;
-    let wasi_ctx = builder.build();
+    let wasi_ctx = builder.build_p1();
 
     let engine = unwrap_engine(engine_resource)?;
     let limits = if let Some(limits) = limits {
@@ -421,7 +429,7 @@ pub fn get_fuel(
 fn add_pipe(
     pipe: Option<ExPipe>,
     builder: &mut WasiCtxBuilder,
-    f: fn(Box<Pipe>, &mut WasiCtxBuilder) -> (),
+    f: fn(Pipe, &mut WasiCtxBuilder),
 ) -> Result<(), rustler::Error> {
     if let Some(ExPipe { resource }) = pipe {
         let pipe = resource.pipe.lock().map_err(|_e| {
@@ -429,7 +437,7 @@ fn add_pipe(
                 "Could not unlock resource as the mutex was poisoned.",
             ))
         })?;
-        let pipe = Box::new(pipe.clone());
+        let pipe = pipe.clone();
         f(pipe, builder);
     }
     Ok(())
@@ -449,12 +457,11 @@ fn preopen_directory(
     preopen: &ExWasiPreopenOptions,
 ) -> Result<(), Error> {
     let path = &preopen.path;
-    let dir = wasi_common::sync::Dir::from_std_file(
-        std::fs::File::open(path).map_err(|err| rustler::Error::Term(Box::new(err.to_string())))?,
-    );
     let guest_path = preopen.alias.as_ref().unwrap_or(path);
+    // Match wasi-common's preopens: allow reads and writes within this directory.
+    // The WASI implementation still enforces the directory's capability boundary.
     builder
-        .preopened_dir(dir, guest_path)
+        .preopened_dir(path, guest_path, FsPerms::ReadWrite)
         .map_err(|err| Error::Term(Box::new(err.to_string())))?;
     Ok(())
 }

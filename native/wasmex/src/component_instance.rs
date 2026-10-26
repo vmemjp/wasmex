@@ -16,7 +16,6 @@ use rustler::{Encoder, OwnedEnv};
 use rustler::{Error, LocalPid};
 use wasmtime::component::{Instance, Linker, LinkerInstance, Type, Val};
 use wasmtime::Trap;
-use wiggle::anyhow::{self};
 
 use rustler::Term;
 
@@ -71,9 +70,16 @@ pub fn new_instance(
 
     let mut linker = Linker::new(store.engine());
     linker.allow_shadowing(true);
-    let _ = wasmtime_wasi::p2::add_to_linker_sync(&mut linker);
+    // Always link WASI, as before the wasmtime 48 move: components built with
+    // cargo-component import wasi:cli even when they never call it, so linking
+    // only for WASI-enabled stores makes them fail to instantiate. A store
+    // without WASI still has no WasiCtx, and a guest that calls WASI there
+    // fails in that call.
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?;
     if store.data().http.is_some() {
-        let _ = wasmtime_wasi_http::add_only_http_to_linker_sync(&mut linker);
+        wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)
+            .map_err(|e| rustler::Error::Term(Box::new(e.to_string())))?;
     }
 
     // Instantiate the component
@@ -129,7 +135,7 @@ fn call_elixir_import(
     params: &[Val],
     result_values: &mut [Val],
     pid: LocalPid,
-) -> Result<(), anyhow::Error> {
+) -> wasmtime::Result<()> {
     let mut msg_env = OwnedEnv::new();
     let callback_token = create_callback_token(name.clone(), namespace.clone());
 
@@ -151,7 +157,7 @@ fn call_elixir_import(
 
     let (success, returned_values) = result.take().unwrap();
     if !success {
-        return Err(anyhow::anyhow!("Callback failed"));
+        return Err(wasmtime::format_err!("Callback failed"));
     }
 
     if !returned_values.is_empty() {
@@ -199,7 +205,10 @@ pub fn call_exported_function(
     let function_params = thread_env.save(given_params);
     let from = thread_env.save(from);
 
-    TOKIO_RUNTIME.spawn(async move {
+    // The guest runs synchronously, and wasmtime-wasi 48's sync WASI calls
+    // block_on the ambient runtime: on a worker thread that panics with
+    // "Cannot start a runtime from within a runtime". Blocking threads may block.
+    TOKIO_RUNTIME.spawn_blocking(move || {
         // Execute function and get the result
         let result = component_execute_function(
             &mut thread_env,
@@ -333,10 +342,8 @@ fn component_execute_function(
             converted_params.as_slice(),
             &mut result,
         ) {
-            Ok(_) => {
-                let _ = function.post_return(&mut *component_store);
-                encode_result(env, result)
-            }
+            // Wasmtime 48 performs post-return as part of call.
+            Ok(_) => encode_result(env, result),
             Err(err) => {
                 // See instance.rs: `{err:#}` keeps the source chain, where a
                 // host function's own error message lives.

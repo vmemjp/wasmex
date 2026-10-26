@@ -1,13 +1,16 @@
 //! A Pipe is a file buffer hold in memory.
 //! It can, for example, be used to replace stdin/stdout/stderr of a WASI module.
 
+use bytes::Bytes;
 use rustler::{Encoder, ResourceArc, Term};
-use std::any::Any;
-use std::io::{self, Cursor, Read, Seek, Write};
+use std::io::{self, BufRead, Cursor, Read, Seek, Write};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
-use wasi_common::{file::FileType, Error, WasiFile};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use wasmtime_wasi::async_trait;
-use wiggle::anyhow::anyhow;
+use wasmtime_wasi::cli::{IsTerminal, StdinStream, StdoutStream};
+use wasmtime_wasi::p2::{InputStream, OutputStream, Pollable, StreamError, StreamResult};
 
 use crate::atoms;
 
@@ -34,10 +37,11 @@ impl Pipe {
 
     /// A pipe whose backing buffer may not grow beyond `capacity` bytes.
     ///
-    /// A write that would exceed the capacity is rejected in full — no
-    /// partial write — and traps the guest. This mirrors
-    /// `wasmtime_wasi::p2::pipe::MemoryOutputPipe`, which is the WASIp2
-    /// equivalent of this type.
+    /// A stream write that would exceed the capacity is rejected in full
+    /// and traps the guest.
+    ///
+    /// ceiling: WASIp1 splits fd_write into chunks of at most 4096 bytes.
+    /// Earlier chunks may be committed before a later chunk traps.
     ///
     /// This matters because a `Pipe` is host memory: a guest that writes in a
     /// loop can exhaust the host heap while paying almost nothing for it. Fuel
@@ -121,44 +125,99 @@ impl Seek for Pipe {
     }
 }
 
-#[async_trait]
-impl WasiFile for Pipe {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    async fn get_filetype(&self) -> Result<FileType, Error> {
-        Ok(FileType::Pipe)
-    }
-
-    async fn write_vectored<'a>(&self, bufs: &[io::IoSlice<'a>]) -> Result<u64, Error> {
-        let capacity = self.capacity;
-        let buffer = &mut *(self.borrow());
-
-        // The guest's write path. Trap rather than return an errno: an errno
-        // is advisory, and a guest looping on `fd_write` to exhaust host
-        // memory is exactly the guest that will ignore one.
-        let requested: u64 = bufs.iter().map(|buf| buf.len() as u64).sum();
-        if !Self::fits(capacity, buffer, requested) {
-            return Err(Error::trap(anyhow!(capacity_exceeded(capacity))));
-        }
-
-        buffer
-            .write_vectored(bufs)
-            .map(|written| written as u64)
-            .map_err(wasi_common::Error::from)
-    }
-
-    async fn read_vectored<'a>(&self, bufs: &mut [io::IoSliceMut<'a>]) -> Result<u64, Error> {
-        let buffer = &mut *(self.borrow());
-        buffer
-            .read_vectored(bufs)
-            .map(|read| read as u64)
-            .map_err(wasi_common::Error::from)
-    }
-
-    fn isatty(&self) -> bool {
+impl IsTerminal for Pipe {
+    fn is_terminal(&self) -> bool {
         false
+    }
+}
+
+impl StdinStream for Pipe {
+    fn async_stream(&self) -> Box<dyn AsyncRead + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    fn p2_stream(&self) -> Box<dyn InputStream> {
+        Box::new(self.clone())
+    }
+}
+
+impl StdoutStream for Pipe {
+    fn async_stream(&self) -> Box<dyn AsyncWrite + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    fn p2_stream(&self) -> Box<dyn OutputStream> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl Pollable for Pipe {
+    async fn ready(&mut self) {}
+}
+
+impl InputStream for Pipe {
+    fn read(&mut self, size: usize) -> StreamResult<Bytes> {
+        let mut buffer = self
+            .buffer
+            .write()
+            .map_err(|e| StreamError::trap(&e.to_string()))?;
+        let available = buffer
+            .fill_buf()
+            .map_err(|e| StreamError::LastOperationFailed(e.into()))?;
+        if available.is_empty() && size != 0 {
+            return Err(StreamError::Closed);
+        }
+        let bytes = Bytes::copy_from_slice(&available[..size.min(available.len())]);
+        buffer.consume(bytes.len());
+        Ok(bytes)
+    }
+}
+
+impl OutputStream for Pipe {
+    fn write(&mut self, bytes: Bytes) -> StreamResult<()> {
+        // Preserve the capacity error as a trap, never an advisory errno.
+        Write::write_all(self, &bytes).map_err(|e| StreamError::Trap(e.into()))
+    }
+
+    fn flush(&mut self) -> StreamResult<()> {
+        Write::flush(self).map_err(|e| StreamError::LastOperationFailed(e.into()))
+    }
+
+    fn check_write(&mut self) -> StreamResult<usize> {
+        // Bound temporary allocations, but check capacity at write time so
+        // exhaustion traps rather than blocking forever or accepting a prefix.
+        Ok(4096)
+    }
+}
+
+impl AsyncRead for Pipe {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let read = Read::read(&mut *self, buf.initialize_unfilled())?;
+        buf.advance(read);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for Pipe {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Write::write(&mut *self, buf))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Write::flush(&mut *self))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
     }
 }
 
@@ -217,7 +276,7 @@ pub fn write_binary(
 ) -> Term {
     let mut pipe = pipe_resource.pipe.lock().unwrap();
 
-    match (*pipe).write(content.as_bytes()) {
+    match io::Write::write(&mut *pipe, content.as_bytes()) {
         Ok(bytes_written) => (atoms::ok(), bytes_written).encode(env),
         _ => atoms::error().encode(env),
     }
