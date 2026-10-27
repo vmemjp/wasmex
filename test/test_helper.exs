@@ -37,6 +37,36 @@ defmodule TestHelper do
   def wasi_test_file_path,
     do: "#{@wasi_test_source_dir}/target/wasm32-wasip1/debug/main.wasm"
 
+  # FORK-ONLY — do not upstream. The fixtures are Rust crates, and Rust builds
+  # run only inside an isolated build VM (vigilix: ~/.config/nix
+  # scripts/rust-vm.sh), never through `cargo` on the machine that runs the
+  # tests. So the suite requires the fixtures already built and placed under
+  # each project's target/ directory, and stops when one is missing instead
+  # of building it. precompile_wasm_files/0 is upstream's builder; it stays
+  # for reference and is not called.
+  def require_prebuilt_wasm_files do
+    missing =
+      [
+        component_type_conversions_file_path(),
+        component_exported_interface_file_path(),
+        wasm_test_file_path(),
+        wasm_link_test_file_path(),
+        wasm_link_dep_test_file_path(),
+        wasm_link_import_test_file_path(),
+        wasm_import_test_file_path(),
+        wasi_test_file_path()
+      ]
+      |> Enum.reject(&File.regular?/1)
+
+    if missing != [] do
+      raise """
+      wasm test fixtures are missing; build them in the rust-build VM, not with cargo here:
+
+      #{Enum.map_join(missing, "\n", &"  #{&1}")}
+      """
+    end
+  end
+
   def precompile_wasm_files do
     [
       @wasm_test_source_dir,
@@ -171,5 +201,5 @@ defmodule TestHelper do
   end
 end
 
-TestHelper.precompile_wasm_files()
+TestHelper.require_prebuilt_wasm_files()
 ExUnit.start()

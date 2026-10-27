@@ -3,38 +3,30 @@ defmodule Wasmex.Native do
 
   mix_config = Mix.Project.config()
   version = mix_config[:version]
-  github_url = mix_config[:package][:links]["GitHub"]
 
+  # FORK-ONLY — do not upstream.
+  #
+  # This fork carries Rust patches, so tessi's precompiled NIFs are never the
+  # right artifact for it. It used to pin `force_build: true`, which compiled
+  # the crate with cargo on every machine that compiled this dependency. Rust
+  # builds now run only inside an isolated build VM (vigilix:
+  # ~/.config/nix scripts/rust-vm.sh), because build.rs and proc macros run
+  # arbitrary code at build time.
+  #
+  # So the NIF is built once in that VM and pinned here by checksum:
+  # checksum-Elixir.Wasmex.Native.exs lists the one artifact this fork accepts.
+  # RustlerPrecompiled looks for it in its cache first and downloads from
+  # `base_url` only when it is missing, and it refuses any file whose sha256
+  # does not match — an unpatched NIF cannot load in its place. There is no
+  # cargo fallback: a missing artifact is a compile error, not a host build.
+  # Only x86_64 Linux is built.
   use RustlerPrecompiled,
     otp_app: :wasmex,
-    base_url: "#{github_url}/releases/download/v#{version}",
+    base_url: "https://github.com/vmemjp/wasmex/releases/download/vigilix-v#{version}",
     version: version,
-    targets: ~w(
-      aarch64-apple-darwin
-      aarch64-apple-ios
-      aarch64-apple-ios-sim
-      aarch64-unknown-linux-gnu
-      aarch64-unknown-linux-musl
-      riscv64gc-unknown-linux-gnu
-      x86_64-apple-darwin
-      x86_64-apple-ios
-      x86_64-pc-windows-gnu
-      x86_64-pc-windows-msvc
-      x86_64-unknown-freebsd
-      x86_64-unknown-linux-gnu
-      x86_64-unknown-linux-musl
-    ),
-    # FORK-ONLY — do not upstream. Upstream reads WASMEX_BUILD here.
-    #
-    # This fork carries Rust patches (the bounded Pipe), so a precompiled NIF
-    # is never the right artifact for it: `base_url` above points at
-    # *tessi's* releases, and downloading one would run unpatched code under
-    # a patched Elixir API — the byte cap would simply not exist, silently.
-    #
-    # Leaving it as `System.get_env("WASMEX_BUILD")` would make that outcome a
-    # matter of whether an env var happened to be exported. It is pinned to
-    # `true` so the source is the only thing that can ever run.
-    force_build: true
+    targets: ~w(x86_64-unknown-linux-gnu),
+    nif_versions: ["2.15"],
+    force_build: false
 
   def engine_new(_engine_config), do: error()
   def engine_precompile_module(_engine_resource, _bytes), do: error()

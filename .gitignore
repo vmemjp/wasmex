@@ -34,7 +34,8 @@ wapm_packages/*
 wapm.lock
 
 # ignore local builds
-checksum-Elixir.Wasmex.Native.exs
+# FORK-ONLY: checksum-Elixir.Wasmex.Native.exs is tracked here. It pins the one
+# NIF built in the isolated build VM (see lib/wasmex/native.ex).
 *.so
 
 package.json
